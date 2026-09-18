@@ -30,8 +30,8 @@
 | DI | Hilt 2.51.1（kapt） |
 | 异步 | Coroutines + Flow / StateFlow |
 | 持久化 | DataStore Preferences（Room 依赖已备，待 v0.3 启用） |
-| 网络 | `HttpURLConnection` + Nominatim（OSM 地址搜索）。Retrofit/OkHttp/Moshi 依赖已声明，**当前未使用** |
-| 地图 | osmdroid 6.1.20（OpenStreetMap 瓦片，MIT 许可，**免 Key**） |
+| 网络 | `HttpURLConnection` + **Photon（主源）/ Nominatim（兜底）**。Retrofit/OkHttp/Moshi 依赖已声明，**当前未使用** |
+| 地图 | osmdroid 6.1.20（OSM 瓦片，MIT 许可，**免 Key**）+ **候选源自动降级**（OSM France / Germany / 官方），规避国内 DNS 污染 |
 | 导航 | Navigation-Compose（依赖已声明，**当前为二元路由，未建 NavHost**） |
 | 后台 | Foreground Service + WorkManager（**尚未实现**） |
 | 国际化 | `values/`（中文默认）+ `values-en`。**无 `values-zh`**；且 UI 文案大量硬编码，国际化尚未真正生效 |
@@ -206,15 +206,18 @@
 
 ### 5.1 地点搜索
 
-**描述：** 顶部搜索框调用 **Nominatim（OpenStreetMap 公共地理编码 API）** 实时联想（v0.2 实际实现，替代原计划的 Google Places Autocomplete）。
+**描述：** 顶部搜索框调用 **Photon**（主源）+ **Nominatim**（兜底）实时联想。均为基于 OSM 数据的免 Key 服务（v0.2 实际实现，替代原计划的 Google Places Autocomplete）。
 
 **优先级：** P1
-**状态：** 待定
+**状态：** ✅ 已完成
 
 **验收标准：**
-- [ ] 输入 2 字符后开始联想，250ms 防抖
-- [ ] 点击结果跳到地图并放置 marker
-- [ ] 网络异常时显示本地降级提示
+- [x] 输入 2 字符后开始联想，250ms 防抖（`MIN_QUERY_LENGTH` / `SEARCH_DEBOUNCE_MS`）
+- [x] 点击结果跳到地图并放置 marker
+- [x] 网络异常时显示降级提示（双源降级；均不可达时提示「地址服务不可达，请检查网络后重试」）
+
+> 🔧 2026-09-18：原单一 Nominatim 源在国内被 DNS 污染，搜索完全不可用，已改为双源。
+> 详见 [docs/network-reachability.md](./docs/network-reachability.md)。
 
 ### 5.2 收藏
 

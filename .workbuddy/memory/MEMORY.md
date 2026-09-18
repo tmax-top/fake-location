@@ -33,6 +33,28 @@
 - `gradlew` 以 100755 提交（可执行位正常）；项目**缺 `gradlew.bat`**，Windows 下无法用 wrapper 构建。
 - `.codebuddy/specs/` 与 `.workbuddy/memory/` 纳入版本控制（非缓存，有价值）。
 
+## 外部服务依赖（国内网络，重要）
+
+- **`*.openstreetmap.org` 在国内存在 DNS 污染** —— 会解析到不可达 IP（甚至 Facebook 的 IP 段）。
+  但**链路本身是通的**（直连正确的 `146.75.45.91:443` 返回 TCP-OK），问题纯在 DNS。
+- **地图瓦片**：`feature-home/.../map/OsmTileSources.kt` 维护 3 个候选源，启动时探测取首个可达：
+  `a.tile.openstreetmap.fr/hot/`（实装默认）→ `a.tile.openstreetmap.de/` → 官方（兜底）。
+- **地址搜索**：Photon（`photon.komoot.io`，主源）→ Nominatim（兜底）。双源都在 `HomeViewModel.remoteSearch()`。
+- ⚠️ **Photon 只支持 `lang=default/de/en/fr`，传 `lang=zh` 会直接 HTTP 400**。不要加 lang 参数
+  —— 不带时返回 OSM 原始名称，中国区数据本身就是中文。
+- ⚠️ **绝不要为国内速度换成高德/腾讯瓦片**：那是 GCJ-02 坐标系，会让「地图上选的点」与「实际注入的坐标」偏移 50~500 m。
+- 完整实测数据、排查命令见 `docs/network-reachability.md`。
+
+## 真机调试
+
+- 用户有一台常连的测试机：Redmi `24122RKC7C`（Android 17 / SDK 37），`adb` 设备号 **`f6e26d28`**，
+  屏幕 `1440x3200`（截图坐标换算：截图宽 488 → 设备 1440，×2.951）。
+- 可用手法：`adb logcat -d | grep ...`、`adb exec-out screencap -p > x.png`、
+  `adb shell input tap/swipe/text`、`adb shell curl`（设备自带 `/system/bin/curl`）。
+- ⚠️ `adb shell input text` **不支持中文**，测中文搜索需换思路（可用 ASCII 查询验证链路）。
+- ⚠️ Gradle 有时对 feature 模块报 `compileDebugKotlin UP-TO-DATE`，需以
+  「dex 里能否找到新字符串」为准来验证改动是否真的进了 APK。
+
 ## 核心引擎设计要点（core-mock）
 
 1. 同时注册 `gps` + `network` 两个 test provider（部分 App 只读 network）

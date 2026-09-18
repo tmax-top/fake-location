@@ -6,6 +6,43 @@
 
 ---
 
+## 0. 最近修复（2026-09-18）
+
+### 地图空白 + 搜索不可用 —— 根因是 DNS 污染
+
+**现象**：地图拖到新区域就是空白（只有缓存区域能看）；地址搜索报
+`failed to connect to nominatim.openstreetmap.org/199.16.156.39 (port 443) ... after 5000ms`。
+
+**根因**：`*.openstreetmap.org` 域名在国内被 DNS 污染，被解析到不可达 IP。
+**网络链路本身正常** —— 直连正确的 `146.75.45.91:443` 返回 TCP-OK，问题纯粹在解析。
+
+**修复**（完整实测记录见 [network-reachability.md](./network-reachability.md)）：
+
+| # | 改动 | 文件 |
+|---|------|------|
+| 1 | 地图瓦片改为「候选源 + 可达性探测」，自动切到 OSM France / Germany / 官方 | `feature-home/.../map/OsmTileSources.kt`（新增）<br>`feature-home/.../HomeRoute.kt` |
+| 2 | 地址搜索改为 Photon 主源 + Nominatim 兜底 | `feature-home/.../HomeViewModel.kt` |
+| 3 | 补上 250ms 搜索防抖（原为每键入即请求） | 同上 |
+| 4 | 错误提示改为可操作文案（原文是原始异常字符串） | 同上 |
+| 5 | 补 OSM 署名 `CopyrightOverlay`（ODbL 合规要求，此前缺失） | `feature-home/.../HomeRoute.kt` |
+| 6 | 超时 5s → connect 8s / read 10s | `feature-home/.../HomeViewModel.kt` |
+
+**真机验证结果**（Redmi 24122RKC7C / Android 17）：
+
+```
+OsmTileSources: 瓦片源探测成功: OSMFranceHOT (https://a.tile.openstreetmap.fr/hot/12/3429/1677.png)
+IOException downloading MapTile 失败数 = 0     （修复前：持续 ConnectException）
+Photon request: https://photon.komoot.io/api/?q=shanghai&limit=6
+降级 Nominatim 次数 = 0                        （主源直接命中）
+```
+
+搜索返回 6 条中文结果，显示名拼接正常，例：
+`上海站 · 上海火车站南广场 · 天目西路街道 · 静安区 · 上海市 · 中国`
+
+> 本次修复**未引入任何 API Key**，仍保持「免 Key」架构；三者均为 OSM 数据、ODbL 许可、WGS-84 坐标系。
+
+---
+
 ## 1. 需求 vs 实现：冲突项（需要修正文档或补实现）
 
 | # | 位置 | REQUIREMENTS.md 写的 | 代码实际 | 处理建议 |
@@ -52,16 +89,20 @@
 
 ### §3 地图与单点定位 —— ✅ 基本完成
 
+> 🔧 2026-09-18：瓦片源已从固定的 `tile.openstreetmap.org`（国内被 DNS 污染）
+> 改为「候选源 + 可达性探测」，默认切到 OSM France HOT。详见本文档第 0 节。
+
 | 验收项 | 状态 | 说明 |
 |-------|------|------|
 | 长按放置 marker + 经纬度浮层 | ⚠️ 部分 | marker 有；经纬度在**底部栏与状态横幅**显示，非地图浮层 |
 | 拖动 marker 微调 | ❌ | marker 未设 `isDraggable` |
-| 地图旋转 / 缩放 / 图层切换（普通/卫星） | ⚠️ 部分 | 缩放 ✅、多点触控 ✅；**旋转关闭**、**无图层切换** |
+| 地图旋转 / 缩放 / 图层切换（普通/卫星） | ⚠️ 部分 | 缩放 ✅、多点触控 ✅、**瓦片源自动降级 ✅**；**旋转关闭**、**无图层切换** |
 | 显示当前位置与 mock 位置连线 | ❌ | 未实现（有 `MyLocation` FAB 但无连线） |
 | 开始后通知栏常驻通知 | ❌ | 无前台服务 |
 | 第三方 App 立即显示目标位置 | ✅ | 双 provider 注入 |
 | 停止后恢复真实位置 | ✅ | `removeTestProvider` |
 | 启动时校验 `isFromMockProvider` 返回 true | ❌ | 未实现自校验 |
+| OSM 署名（ODbL 合规） | ✅ | 2026-09-18 补 `CopyrightOverlay`（地图页；「关于」页仍待补） |
 
 ### §1.2 Mock 核心引擎细节 —— ⚠️ 大部分完成
 
@@ -77,14 +118,14 @@
 | 并发竞争 → 加锁串行化 | ✅ | `Mutex` + `cancelAndJoin` |
 | 停止后立即停止注入，不做渐进回归 | ✅ | 直接 `removeTestProvider` |
 
-### §5.1 地点搜索 —— ⚠️ 部分完成（实现在 feature-home 内，未拆到 feature-search）
+### §5.1 地点搜索 —— ✅ 已完成（实现在 feature-home 内，未拆到 feature-search）
 
 | 验收项 | 状态 | 说明 |
 |-------|------|------|
-| 输入 2 字符后开始联想，250ms 防抖 | ⚠️ 部分 | 有 `length < 2` 拦截，**无 250ms 防抖**，每次键入都发请求 |
+| 输入 2 字符后开始联想，250ms 防抖 | ✅ | `MIN_QUERY_LENGTH = 2` + `SEARCH_DEBOUNCE_MS = 250`，新一轮输入先取消上一轮任务 |
 | 点击结果跳到地图并放置 marker | ✅ | `pickSearchResult` |
-| 网络异常时显示本地降级提示 | ⚠️ 部分 | 有 `_error` Snackbar，但无「本地降级」能力 |
-| 实现位置 | ⚠️ | 写在 `feature-home/HomeViewModel`，`feature-search` 模块仍是空占位 |
+| 网络异常时显示降级提示 | ✅ | 双源降级 Photon → Nominatim；两源均不可达时提示「地址服务不可达，请检查网络后重试」 |
+| 实现位置 | ⚠️ | 仍写在 `feature-home/HomeViewModel`，`feature-search` 模块仍是空占位（待 v0.3 迁移） |
 
 ### 未开始
 
@@ -117,7 +158,7 @@
 | 3 | **UI 文案硬编码中文**，`strings.xml` 中已定义的 key 未被使用 | `HomeRoute.kt`（"搜索地址"、"当前位置"、"开始模拟"、"停止模拟"、"请先在地图上选点"、"Mock 目标"）、`StatusBanner` 全部文案、`OnboardingRoute.kt`、`OnboardingViewModel.kt`（3 页全部文案） | 切换英文后引导页与主页面仍是中文，国际化形同虚设 |
 | 4 | **无 NavHost**，只有 `needsOnboarding` 二元 switch | `MainActivity.AppRoot()` | 新增多页面功能前必须先建导航图 |
 | 5 | `:data:*` 与 6 个 feature 占位模块**未被 `:app` 依赖** | `app/build.gradle.kts` | 直接写业务代码不会进 APK |
-| 6 | 搜索无防抖，连续键入会打多次 Nominatim；Nominatim 公共服务有使用频率要求 | `HomeViewModel.searchAddress()` | 可能被限流；且**违反 OSM 使用策略**的批量请求要求 |
+| ~~6~~ | ~~搜索无防抖，连续键入会打多次 Nominatim~~ | — | ✅ **已修复**（2026-09-18）：加了 250ms 防抖，主源改为 Photon |
 | 7 | 无任何静态检查（ktlint / detekt）与 CI | 全仓库 | 规范靠人工 |
 
 ### P2

@@ -14,23 +14,30 @@
 
 | 原方案 | 现方案 | 许可证 / 使用条款 |
 |-------|-------|-----------------|
-| Google Maps SDK（地图渲染） | **osmdroid 6.1.20** + OpenStreetMap 瓦片 | osmdroid MIT；OSM 瓦片数据 ODbL，需遵守 [瓦片使用政策](https://operations.osmfoundation.org/policies/tiles/) |
-| Google Places Autocomplete（地址搜索） | **Nominatim** 公共 API（`nominatim.openstreetmap.org`） | OSM 数据 ODbL，遵守 [Nominatim 使用政策](https://operations.osmfoundation.org/policies/nominatim/)：**必须设置自定义 `User-Agent`**、禁止高频批量请求 |
+| Google Maps SDK（地图渲染） | **osmdroid 6.1.20** + OpenStreetMap 瓦片（OSM France / Germany / 官方三候选，自动降级） | osmdroid MIT；OSM 瓦片数据 ODbL，需遵守 [瓦片使用政策](https://operations.osmfoundation.org/policies/tiles/) |
+| Google Places Autocomplete（地址搜索） | **Photon**（`photon.komoot.io`，主源）+ **Nominatim**（`nominatim.openstreetmap.org`，兜底） | OSM 数据 ODbL。Photon 由 Komoot 维护；Nominatim 需遵守 [使用政策](https://operations.osmfoundation.org/policies/nominatim/)：**必须设置自定义 `User-Agent`**、禁止高频批量请求 |
 | Google Directions API（路线规划） | 计划 v0.4 改用 **OSRM 公共 API**（尚未实现） | OSRM BSD；公共 demo server 有使用限制 |
+
+> ⚠️ **国内网络注意**：`nominatim.openstreetmap.org` 与 `tile.openstreetmap.org` 存在 **DNS 污染**，
+> 国内多数网络下不可达。当前的应对是多源降级（详见 [network-reachability.md](./network-reachability.md)）。
+> 这也是「免 Key」路线的主要代价 —— 免费公共服务的可用性不受自己控制。
 
 ### 代码中的实现位置
 
-- 地图瓦片源：`feature-home/src/main/kotlin/com/fakelocation/feature/home/HomeRoute.kt` → `TileSourceFactory.MAPNIK`
-- 地址搜索：`feature-home/.../HomeViewModel.kt` → `nominatimSearch()`，已按政策设置 `User-Agent: FakeLocation-Android/0.2.0`
+- 地图瓦片源与探测：`feature-home/src/main/kotlin/com/fakelocation/feature/home/map/OsmTileSources.kt`
+- 地图装配与 OSM 署名：`feature-home/src/main/kotlin/com/fakelocation/feature/home/HomeRoute.kt`
+- 地址搜索（Photon + Nominatim 双源）：`feature-home/.../HomeViewModel.kt`
 
 ---
 
 ## 使用第三方 OSM 公共服务时的注意事项
 
-1. **必须设置可识别的 `User-Agent`**（当前已设置），不要用默认值或伪造浏览器 UA。
-2. **不要在 UI 里做无限频率的请求**：Nomatim 目前**没有防抖**（每次键入都发请求），正式对外发布前必须补 250ms 防抖 + 最小请求间隔。
-3. **不要大批量抓取**：瓦片和 Nominatim 都是志愿者出资运维的公共服务。若日活上来，应自建瓦片服务或切换到商业地图服务。
-4. **署名要求**：使用 OSM 数据需在 App 内展示「© OpenStreetMap contributors」。**当前未实现**，上架前必补（见 `release-checklist.md`）。
+1. **必须设置可识别的 `User-Agent`**（当前已设置 `FakeLocation-Android/0.2.0`），不要用默认值或伪造浏览器 UA。
+2. **不要在 UI 里做无限频率的请求**：已加 250ms 防抖（`SEARCH_DEBOUNCE_MS`），继续避免高频请求。
+3. **不要大批量抓取**：瓦片和地理编码都是志愿者出资运维的公共服务。若日活上来，应自建瓦片服务或切换到商业地图服务。
+4. **署名要求**：使用 OSM 数据需展示「© OpenStreetMap contributors」。
+   - ✅ 地图页已通过 `CopyrightOverlay` 展示（2026-09-18 补）
+   - ⬜ 「关于」页仍待补
 
 ---
 

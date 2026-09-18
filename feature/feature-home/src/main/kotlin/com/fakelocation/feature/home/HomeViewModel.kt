@@ -17,6 +17,8 @@ import com.fakelocation.core.mock.MockLocationEngine
 import com.fakelocation.core.mock.MockState
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -26,6 +28,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
+import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
@@ -65,6 +68,9 @@ class HomeViewModel @Inject constructor(
     private val _error = MutableStateFlow<String?>(null)
     private val _searchResults = MutableStateFlow<List<GeocodeResult>>(emptyList())
     private val _isSearching = MutableStateFlow(false)
+
+    /** 进行中的搜索任务。防抖时先取消上一轮，避免旧结果覆盖新结果。 */
+    private var searchJob: Job? = null
 
     val uiState: StateFlow<HomeUiState> = combine(
         _picked,
@@ -124,77 +130,133 @@ class HomeViewModel @Inject constructor(
     }
 
     /**
-     * 用 Nominatim（OpenStreetMap 公开搜索 API）搜索地址。
+     * 地址搜索。主源 **Photon**，兜底 Nominatim。
      *
-     * 选 Nominatim 而非系统 Geocoder 的原因：
-     * - 国内 ROM 的系统 Geocoder 通常基于 Google Play 服务，**阉割版会静默返回空列表**
-     *   （不抛异常，调用方完全不知道失败）— 这就是上一版不工作的根因。
-     * - Nominatim 是 OSM 公共服务，免 key、无额度限制；osmdroid 反正也要下瓦片，
-     *   访问 OSM 域名是通的。
-     * - 行为跨设备一致：所有搜索结果都来自同一个后端。
+     * ## 为什么换掉单一 Nominatim 源（关键修复 N2）
      *
-     * 用 [HttpURLConnection]（系统内置）调一次，IO 线程 + 5s timeout。
-     * 返回结果为有序（按 Nominatim 相关度排序），最多 [MAX_SEARCH_RESULTS] 条。
+     * 原来只用 `nominatim.openstreetmap.org`。该域名在国内会被 **DNS 污染**：
+     * 实测被解析到不可达的 `74.86.142.55`，连接超时后抛 ConnectException，
+     * 用户只看到一句原始异常字符串，搜索完全不可用。
+     *
+     * 现改为双源：
+     * 1. **Photon**（`photon.komoot.io`）—— 基于 OSM 数据的免费地理编码服务。
+     *    免 Key、实测国内可直连、中文检索质量好（「上海外滩」直接命中「上海外滩美术馆」）
+     * 2. **Nominatim** —— 兜底。国外网络或用户挂代理时可用
+     *
+     * 两者都返回 **WGS-84** 坐标，与引擎注入的坐标系一致，无偏移问题。
      */
-    fun searchAddress(@Suppress("UNUSED_PARAMETER") context: Context, query: String) {
+    fun searchAddress(query: String) {
         val q = query.trim()
-        if (q.isEmpty()) {
-            _searchResults.value = emptyList()
-            return
-        }
-        // 最低限度 debounce：单字符不搜（避免每个键入都打 Nominatim）
-        if (q.length < 2) {
+        // 新一轮输入先取消上一轮
+        searchJob?.cancel()
+        searchJob = null
+
+        if (q.length < MIN_QUERY_LENGTH) {
             _searchResults.value = emptyList()
             _isSearching.value = false
             return
         }
+
         _isSearching.value = true
-        viewModelScope.launch {
-            val results = withContext(Dispatchers.IO) {
-                nominatimSearch(q)
-            }
+        searchJob = viewModelScope.launch {
+            // 防抖：连续键入只发最后一次请求。既省流量，也避免触发
+            // Photon / Nominatim 的频率限制（两者都是志愿者运维的公共服务）
+            delay(SEARCH_DEBOUNCE_MS)
+            val results = withContext(Dispatchers.IO) { remoteSearch(q) }
             _searchResults.value = results
             _isSearching.value = false
         }
     }
 
-    private fun nominatimSearch(query: String): List<GeocodeResult> = runCatching {
-        val encoded = URLEncoder.encode(query, "UTF-8")
-        // 限制 limit + addressdetails=1（让 display_name 包含详细地址）
-        val urlStr =
-            "https://nominatim.openstreetmap.org/search?q=$encoded&format=json&limit=" +
-                "$MAX_SEARCH_RESULTS&addressdetails=1"
-        Log.w(TAG, "Nominatim request: $urlStr")
-        val connection = (URL(urlStr).openConnection() as HttpURLConnection).apply {
-            requestMethod = "GET"
-            connectTimeout = 5_000
-            readTimeout = 5_000
-            // Nominatim 使用策略要求：必须设置 User-Agent，禁用默认 User-Agent（基于 OkHttp）
-            setRequestProperty("User-Agent", "FakeLocation-Android/0.2.0")
-            setRequestProperty("Accept", "application/json")
-            setRequestProperty("Accept-Language", Locale.getDefault().language)
+    /**
+     * 双源搜索：先 Photon，无结果或失败再降级 Nominatim。
+     * 必须在 IO 线程调用（会发起阻塞式网络请求）。
+     */
+    private fun remoteSearch(query: String): List<GeocodeResult> {
+        val photon = runCatching { photonSearch(query) }
+            .onFailure { Log.w(TAG, "Photon 搜索失败", it) }
+            .getOrNull()
+        if (!photon.isNullOrEmpty()) return photon
+
+        Log.w(TAG, "Photon 无结果或失败，降级 Nominatim")
+        val nominatim = runCatching { nominatimSearch(query) }
+            .onFailure { Log.w(TAG, "Nominatim 搜索失败", it) }
+            .getOrNull()
+        if (!nominatim.isNullOrEmpty()) return nominatim
+
+        // 两个源都没拿到数据：给可操作的提示，而不是抛原始异常字符串。
+        // 只有一个源「连不上」（== null）才算网络故障；两个都返回空数组说明是真的没搜到。
+        if (photon == null && nominatim == null) {
+            _error.value = "搜索失败：地址服务不可达，请检查网络后重试（可尝试切换 Wi-Fi / 移动数据）"
         }
-        try {
-            val code = connection.responseCode
-            if (code !in 200..299) {
-                Log.w(TAG, "Nominatim HTTP $code")
-                _error.value = "搜索失败：HTTP $code"
-                return@runCatching emptyList()
-            }
-            val body = connection.inputStream.bufferedReader().use { it.readText() }
-            Log.w(TAG, "Nominatim response: ${body.take(200)}…")
-            parseNominatimResults(body)
-        } finally {
-            connection.disconnect()
-        }
-    }.getOrElse { e ->
-        Log.w(TAG, "Nominatim failed", e)
-        _error.value = "搜索失败：${e.message ?: "未知错误"}"
-        emptyList()
+        return emptyList()
     }
 
-    private fun parseNominatimResults(json: String): List<GeocodeResult> {
-        val array = JSONArray(json)
+    // region -- Photon（主源）--
+
+    /**
+     * Photon（Komoot）搜索，返回 GeoJSON FeatureCollection。
+     * 见 https://photon.komoot.io
+     */
+    private fun photonSearch(query: String): List<GeocodeResult> {
+        val encoded = URLEncoder.encode(query, "UTF-8")
+        // 注意：**不要**传 `lang=zh`。Photon 只支持 default / de / en / fr，
+        // 传 zh 会直接返回 HTTP 400。不带 lang 时返回 OSM 原始名称，
+        // 中国区域的数据本身就是中文（实测「上海外滩」→「上海外滩美术馆」）。
+        val urlStr = "$PHOTON_ENDPOINT?q=$encoded&limit=$MAX_SEARCH_RESULTS"
+        Log.w(TAG, "Photon request: $urlStr")
+
+        val body = httpGet(urlStr)
+        val features = JSONObject(body).optJSONArray("features") ?: return emptyList()
+        return (0 until features.length()).mapNotNull { i ->
+            val feature = features.optJSONObject(i) ?: return@mapNotNull null
+            // GeoJSON 的坐标顺序是 [经度, 纬度] —— 别弄反
+            val coordinates = feature.optJSONObject("geometry")
+                ?.optJSONArray("coordinates")
+                ?: return@mapNotNull null
+            val lon = coordinates.optDouble(0, Double.NaN)
+            val lat = coordinates.optDouble(1, Double.NaN)
+            if (lat.isNaN() || lon.isNaN()) return@mapNotNull null
+
+            val props = feature.optJSONObject("properties") ?: JSONObject()
+            val displayName = formatPhotonName(props)
+            if (displayName.isBlank()) null else GeocodeResult(displayName, LatLng(lat, lon))
+        }
+    }
+
+    /**
+     * 把 Photon 的 `properties` 拼成一行可读地址。
+     * 例：`上海外滩美术馆 · 虎丘路 20 · 外滩街道 · 上海市 · 中国`
+     */
+    private fun formatPhotonName(props: JSONObject): String {
+        fun text(key: String): String? =
+            props.optString(key).takeIf { it.isNotBlank() && it != "null" }
+
+        val streetLine = text("street")?.let { street ->
+            text("housenumber")?.let { "$street $it" } ?: street
+        }
+        return listOfNotNull(
+            text("name"),
+            streetLine,
+            text("district"),
+            text("city"),
+            text("state"),
+            text("country"),
+        ).distinct().joinToString(" · ")
+    }
+
+    // endregion
+
+    // region -- Nominatim（兜底）--
+
+    private fun nominatimSearch(query: String): List<GeocodeResult> {
+        val encoded = URLEncoder.encode(query, "UTF-8")
+        val urlStr = "$NOMINATIM_ENDPOINT?q=$encoded&format=json&limit=" +
+            "$MAX_SEARCH_RESULTS&addressdetails=1"
+        Log.w(TAG, "Nominatim request: $urlStr")
+
+        val body = httpGet(urlStr)
+        val array = JSONArray(body)
         return (0 until array.length()).mapNotNull { i ->
             val obj = array.optJSONObject(i) ?: return@mapNotNull null
             val lat = obj.optDouble("lat", Double.NaN)
@@ -208,8 +270,36 @@ class HomeViewModel @Inject constructor(
         }
     }
 
+    // endregion
+
+    /**
+     * 发 GET 并返回响应体；非 2xx 直接抛异常，由上层 `runCatching` 兜住。
+     *
+     * User-Agent 对 Nominatim 是**强制**要求（其使用政策规定），Photon 无强制要求但一并发。
+     */
+    private fun httpGet(urlStr: String): String {
+        val connection = (URL(urlStr).openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = CONNECT_TIMEOUT_MS
+            readTimeout = READ_TIMEOUT_MS
+            setRequestProperty("User-Agent", USER_AGENT)
+            setRequestProperty("Accept", "application/json")
+            setRequestProperty("Accept-Language", Locale.getDefault().language)
+        }
+        try {
+            val code = connection.responseCode
+            if (code !in 200..299) error("HTTP $code")
+            return connection.inputStream.bufferedReader().use { it.readText() }
+        } finally {
+            connection.disconnect()
+        }
+    }
+
     fun clearSearchResults() {
+        searchJob?.cancel()
+        searchJob = null
         _searchResults.value = emptyList()
+        _isSearching.value = false
     }
 
     /**
@@ -305,6 +395,28 @@ class HomeViewModel @Inject constructor(
 
         /** 搜索结果上限，避免渲染过多 marker。 */
         const val MAX_SEARCH_RESULTS: Int = 6
+
+        /** 触发搜索所需的最少字符数。 */
+        private const val MIN_QUERY_LENGTH = 2
+
+        /** 键入防抖窗口，毫秒。 */
+        private const val SEARCH_DEBOUNCE_MS = 250L
+
+        /**
+         * 网络超时。比原来的 5s 放宽 —— 跨境访问 Photon / Nominatim 时
+         * 5s 容易在慢链路上误判为失败。
+         */
+        private const val CONNECT_TIMEOUT_MS = 8_000
+        private const val READ_TIMEOUT_MS = 10_000
+
+        /** Nominatim 使用政策强制要求可识别的 User-Agent。 */
+        private const val USER_AGENT = "FakeLocation-Android/0.2.0"
+
+        /** 主源：Photon（Komoot），基于 OSM 的免费地理编码，免 Key。 */
+        private const val PHOTON_ENDPOINT = "https://photon.komoot.io/api/"
+
+        /** 兜底源：Nominatim（国内部分网络会被 DNS 污染，仅作降级）。 */
+        private const val NOMINATIM_ENDPOINT = "https://nominatim.openstreetmap.org/search"
 
         /**
          * 检查所有必需权限是否都已授予。

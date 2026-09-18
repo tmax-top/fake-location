@@ -23,7 +23,9 @@
 ### 现在能跑通什么
 
 - ✅ 首次启动 3 页引导：介绍 → 跳转「开发者选项 → 选择模拟位置应用」→ 申请定位权限（可跳过，状态持久化）
-- ✅ 主地图页（osmdroid / OSM 瓦片）：长按选点、拖动微调、地址搜索（Nominatim）、回到当前位置
+- ✅ 主地图页（osmdroid / OSM 瓦片）：长按选点、拖动微调、地址搜索、回到当前位置
+- ✅ **瓦片源自动降级**：探测 OSM France / Germany / 官方三个候选源，取第一个可达的。规避 `*.openstreetmap.org` 在国内被 DNS 污染导致的地图空白
+- ✅ **地址搜索双源降级**：Photon 主源 + Nominatim 兜底，250 ms 防抖
 - ✅ 开始 / 停止模拟：gps + network 双 provider 注入，1 Hz，±3 m 随机抖动
 - ✅ 顶部状态横幅：实时提示缺失权限 / 未授权 / 运行中 / 已选点
 - ❌ 路线模拟、收藏、历史、设置、诊断页（均为空壳占位）
@@ -115,8 +117,8 @@ fake-location/
 | DI | Hilt 2.51.1（kapt） |
 | 异步 | Coroutines + Flow / StateFlow |
 | 持久化 | DataStore Preferences（Room 依赖已备，待 v0.3 使用） |
-| 地图 | osmdroid 6.1.20（OSM 瓦片，MIT，免 Key） |
-| 地址搜索 | Nominatim（OSM 公共 API，免 Key，`HttpURLConnection`） |
+| 地图 | osmdroid 6.1.20（OSM 瓦片，MIT，免 Key）+ 候选源自动降级 |
+| 地址搜索 | Photon（主源）+ Nominatim（兜底），均基于 OSM 数据、免 Key |
 | 测试 | JUnit 4 + kotlin-test |
 
 ---
@@ -141,7 +143,8 @@ fake-location/
 2. **不保证欺骗所有 App**：部分 App 通过 `Location.isFromMockProvider` 或服务端 IP/基站交叉校验识别虚拟定位。
 3. **国内 ROM 差异**：MIUI / EMUI / HarmonyOS / ColorOS 对 mock provider 有额外限制，需逐个验证（尚未做兼容性矩阵）。
 4. **jitter 只解决视觉层真实感**，对设备指纹 / 行为画像级别的反作弊无效。
-5. **Release 包当前用 debug keystore 签名**，仅可内部安装，**不可上架**。上架前必做见 [docs/release-checklist.md](./docs/release-checklist.md)。
+5. **依赖 OSM 免费公共服务**：Photon / OSM France / OSM Germany 均为志愿者运维。国内网络对 `*.openstreetmap.org` 存在 **DNS 污染**，App 已做多源降级，但若某网络下所有候选源都不可达，地图仍会空白。详见 [docs/network-reachability.md](./docs/network-reachability.md)。
+6. **Release 包当前用 debug keystore 签名**，仅可内部安装，**不可上架**。上架前必做见 [docs/release-checklist.md](./docs/release-checklist.md)。
 
 ---
 
@@ -161,5 +164,6 @@ fake-location/
 | [REQUIREMENTS.md](./REQUIREMENTS.md) | 产品需求、验收标准、迭代里程碑 |
 | [docs/architecture.md](./docs/architecture.md) | 模块架构、分层约定、扩展指南 |
 | [docs/implementation-status.md](./docs/implementation-status.md) | 需求 vs 实现逐条对照、已知问题清单 |
+| [docs/network-reachability.md](./docs/network-reachability.md) | **外部服务依赖与国内网络可达性**（DNS 污染排查、瓦片/搜索多源策略） |
 | [docs/api-keys.md](./docs/api-keys.md) | 为什么没有 API Key，以及将来若引入时要怎么做 |
 | [docs/release-checklist.md](./docs/release-checklist.md) | 上架前检查清单 |

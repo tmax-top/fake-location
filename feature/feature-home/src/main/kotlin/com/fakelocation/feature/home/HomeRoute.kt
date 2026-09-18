@@ -55,10 +55,14 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.fakelocation.core.common.model.LatLng
+import com.fakelocation.feature.home.map.OsmTileSources
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import org.osmdroid.events.MapEventsReceiver
-import org.osmdroid.tileprovider.tilesource.TileSourceFactory
+import org.osmdroid.tileprovider.tilesource.ITileSource
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
+import org.osmdroid.views.overlay.CopyrightOverlay
 import org.osmdroid.views.overlay.MapEventsOverlay
 import org.osmdroid.views.overlay.Marker
 
@@ -144,7 +148,7 @@ fun HomeRoute(
                     query = searchQuery,
                     onQueryChange = {
                         searchQuery = it
-                        viewModel.searchAddress(context, it)
+                        viewModel.searchAddress(it)
                     },
                     onClear = {
                         searchQuery = ""
@@ -286,7 +290,9 @@ private fun OsmMapContent(
 ) {
     val context = LocalContext.current
 
-    val mapView = remember { createMapView(context) }
+    // 首帧先用默认候选源，避免白屏；探测到更合适的源后由下方 LaunchedEffect 切换
+    val initialTileSource = remember { OsmTileSources.default() }
+    val mapView = remember { createMapView(context, initialTileSource) }
     // 用 Compose state 持有当前 marker 引用，避免每次重挂
     var pickedMarker by remember { mutableStateOf<Marker?>(null) }
 
@@ -298,6 +304,19 @@ private fun OsmMapContent(
     LaunchedEffect(Unit) {
         mapView.controller.setZoom(12.0)
         mapView.controller.setCenter(GeoPoint(31.2304, 121.4737)) // 默认上海
+    }
+
+    // 关键修复（N1）：osmdroid 默认源 tile.openstreetmap.org 在国内会被 DNS 污染，
+    // 瓦片请求全部 ConnectException，地图只剩缓存区域能看，拖到新位置就是空白。
+    // 这里在 IO 线程探测一组**同源**候选（OSM 法国 HOT / OSM 德国 / 官方），
+    // 切到第一个可达的。三者均为 OSM 数据、ODbL 许可、免 Key、WGS-84 坐标系，
+    // 与引擎注入的坐标完全一致，切换后不会有任何偏移。
+    LaunchedEffect(Unit) {
+        val resolved = withContext(Dispatchers.IO) { OsmTileSources.resolveBlocking() }
+        if (resolved !== initialTileSource) {
+            mapView.setTileSource(resolved)
+            mapView.invalidate()
+        }
     }
 
     // 选点变化 → 移动相机 + 更新 marker
@@ -335,12 +354,14 @@ private fun OsmMapContent(
     )
 }
 
-private fun createMapView(context: Context): MapView = MapView(context).apply {
-    setTileSource(TileSourceFactory.MAPNIK) // OSM 主图源（免 Key）
+private fun createMapView(context: Context, tileSource: ITileSource): MapView = MapView(context).apply {
+    setTileSource(tileSource)
     setMultiTouchControls(true)
     isHorizontalMapRepetitionEnabled = false
     isVerticalMapRepetitionEnabled = false
     setUseDataConnection(true)
+    // ODbL 许可要求展示数据来源署名。之前缺失，属合规风险。
+    overlays.add(CopyrightOverlay(context))
 }
 
 private fun attachLongPressOverlay(mapView: MapView, onPick: (LatLng) -> Unit) {
