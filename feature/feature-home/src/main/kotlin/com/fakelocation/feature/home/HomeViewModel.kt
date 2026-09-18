@@ -169,26 +169,34 @@ class HomeViewModel @Inject constructor(
     }
 
     /**
-     * 双源搜索：先 Photon，无结果或失败再降级 Nominatim。
+     * 双源搜索：Photon 主源，**仅在其请求失败（抛异常）时**降级 Nominatim。
      * 必须在 IO 线程调用（会发起阻塞式网络请求）。
+     *
+     * ## 为什么「返回 0 条」不降级
+     *
+     * 「查得到但没匹配」是正常业务结果，不是网络故障。若此时降级到 Nominatim
+     * （国内被 DNS 污染），用户要白等 8s 连接超时 + 10s 读超时才看到提示 ——
+     * 实测用户输入「上海东镇高」就踩到了这个坑。
      */
     private fun remoteSearch(query: String): List<GeocodeResult> {
         val photon = runCatching { photonSearch(query) }
             .onFailure { Log.w(TAG, "Photon 搜索失败", it) }
             .getOrNull()
-        if (!photon.isNullOrEmpty()) return photon
 
-        Log.w(TAG, "Photon 无结果或失败，降级 Nominatim")
+        if (photon != null) {
+            if (photon.isEmpty()) Log.w(TAG, "Photon 无匹配结果")
+            return photon
+        }
+
+        // 只有 Photon 真正失败才降级（例如被 DNS 污染、被限流）
+        Log.w(TAG, "Photon 请求失败，降级 Nominatim")
         val nominatim = runCatching { nominatimSearch(query) }
             .onFailure { Log.w(TAG, "Nominatim 搜索失败", it) }
             .getOrNull()
-        if (!nominatim.isNullOrEmpty()) return nominatim
+        if (nominatim != null) return nominatim
 
-        // 两个源都没拿到数据：给可操作的提示，而不是抛原始异常字符串。
-        // 只有一个源「连不上」（== null）才算网络故障；两个都返回空数组说明是真的没搜到。
-        if (photon == null && nominatim == null) {
-            _error.value = "搜索失败：地址服务不可达，请检查网络后重试（可尝试切换 Wi-Fi / 移动数据）"
-        }
+        // 两个源都请求失败（而非都返回空）才算网络不可用
+        _error.value = "搜索失败：地址服务不可达，请检查网络后重试（可尝试切换 Wi-Fi / 移动数据）"
         return emptyList()
     }
 

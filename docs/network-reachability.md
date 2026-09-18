@@ -77,6 +77,9 @@ HomeViewModel: 搜索失败：failed to connect to nominatim.openstreetmap.org/1
 - Photon 返回 GeoJSON `FeatureCollection`，注意 **`geometry.coordinates` 是 `[经度, 纬度]`**
 - **不要传 `lang=zh`** —— Photon 只支持 `default/de/en/fr`，传 `zh` 直接返回 HTTP 400。
   不带 `lang` 时返回 OSM 原始名称，中国区域数据本身就是中文
+- **降级只在 Photon 请求失败（抛异常）时触发，返回 0 条不降级** ——
+  「查得到但没匹配」是正常业务结果，不是网络故障。若此时降级到国内不可达的 Nominatim，
+  用户要白等 8s 连接超时 + 10s 读超时（实测输入「上海东镇高」踩到过这个坑）
 - 实际验证：`q=shanghai` → 「上海站 · 上海火车站南广场 · 天目西路街道 · 静安区 · 上海市 · 中国」
 
 ---

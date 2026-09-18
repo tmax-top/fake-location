@@ -26,6 +26,7 @@
 | 4 | 错误提示改为可操作文案（原文是原始异常字符串） | 同上 |
 | 5 | 补 OSM 署名 `CopyrightOverlay`（ODbL 合规要求，此前缺失） | `feature-home/.../HomeRoute.kt` |
 | 6 | 超时 5s → connect 8s / read 10s | `feature-home/.../HomeViewModel.kt` |
+| 7 | 修正降级语义：Photon 返回 0 条**不**降级，仅请求失败才降级（避免白等 18s 超时） | 同上 |
 
 **真机验证结果**（Redmi 24122RKC7C / Android 17）：
 
