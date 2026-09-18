@@ -20,6 +20,19 @@
 - **状态模式**：`MutableStateFlow` + `combine` → `stateIn(WhileSubscribed(5_000))`；一次性事件用 `StateFlow<String?>` + `consumeXxx()` 消费。
 - **注释风格**：KDoc 用中文，关键修复点在注释标注编号（如 `关键修复（S1）`）——新增代码请延续。
 
+## 版本控制
+
+- **远端**：`fake-location` → `git@github.com:tmax-top/fake-location.git`；分支 `master`，跟踪 `fake-location/master`
+- **基线提交**：`8f67bd3` "chore: 导入 v0.2.0 完整工程基线"（101 files, 4957 insertions）
+- **⚠️ `.gitignore` 铁律**：构建产物用**不带前导斜杠**的 `build/` 和 `.gradle/`。
+  绝对不要写 `*/build/` 或 `/*/build/` —— gitignore 里带 `/` 的模式锚定根目录且 `*` 不跨 `/`，
+  这类写法只能匹配**一层**目录，`core/*/build/`、`feature/*/build/` 会全部漏掉
+  （曾导致 3581 个待提交文件，其中 3534 个是编译产物）。
+- **⚠️ 全局配置坑**：`~/.gitignore_global` 含一条 `.gitignore` 规则，会让**所有仓库**忽略自己的
+  `.gitignore`，使其不出现在 untracked 列表。需要 `git add -f .gitignore` 绕过。
+- `gradlew` 以 100755 提交（可执行位正常）；项目**缺 `gradlew.bat`**，Windows 下无法用 wrapper 构建。
+- `.codebuddy/specs/` 与 `.workbuddy/memory/` 纳入版本控制（非缓存，有价值）。
+
 ## 核心引擎设计要点（core-mock）
 
 1. 同时注册 `gps` + `network` 两个 test provider（部分 App 只读 network）
@@ -39,7 +52,7 @@
 | 空壳占位 | `:data:data-local/remote/repository`、`feature-search/favorites/history/route/settings/diagnostics` —— **均未被 `:app` 依赖** |
 | 无 NavHost | `MainActivity.AppRoot()` 只有 onboarding/home 二元 switch |
 | 无前台服务 | Manifest 已声明 `FOREGROUND_SERVICE_LOCATION` 权限，但无任何 Service 实现 |
-| 无 Git | 仓库未初始化版本控制 |
+| 无 Git | ~~仓库未初始化版本控制~~ → 已建立，远端 `tmax-top/fake-location`，基线 `8f67bd3` |
 | Release 签名 | 用 `debug.keystore`，不可上架 |
 | 测试 | 仅 2 个纯函数单测（`GeoUtilsTest`、`JitterGeneratorTest`） |
 
