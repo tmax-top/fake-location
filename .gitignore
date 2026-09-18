@@ -1,0 +1,54 @@
+# ============================================================
+# FakeLocation .gitignore
+# ============================================================
+# 关键点：`build/` 与 `.gradle/` 必须**不带前导斜杠**。
+# 带斜杠的写法（如 `*/build/`、`/*/build/`）只能匹配一层目录，
+# 覆盖不到 core/core-mock/build/、feature/feature-home/build/
+# 这类两层路径 —— 曾导致 3500+ 构建产物被误纳入待提交列表。
+# ============================================================
+
+# ---------- Gradle / Android 构建产物 ----------
+build/
+.gradle/
+.kotlin/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# ---------- 包产物与内存快照 ----------
+*.apk
+*.aab
+*.ap_
+*.hprof
+*.prof
+
+# ---------- 本地配置与密钥（严禁提交） ----------
+local.properties
+keystore.properties
+*.jks
+*.keystore
+google-services.json
+
+# ---------- IDE ----------
+.idea/
+.vscode/
+*.iml
+*.iws
+*.ipr
+
+# ---------- 日志与临时文件 ----------
+*.log
+*.tmp
+*.bak
+*.orig
+*.rej
+*.patch
+*.diff
+
+# ---------- 操作系统 ----------
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+Thumbs.db
+Desktop.ini

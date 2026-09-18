@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="home_title">FakeLocation</string>
+    <string name="home_pick_hint">Long press the map to select a target location</string>
+    <string name="home_start">Start Mock</string>
+    <string name="home_stop">Stop Mock</string>
+    <string name="home_need_permission">Location permission required</string>
+    <string name="home_need_mock_auth">Please authorize this app in Developer Options → Select mock location app</string>
+    <string name="home_running">Mock location running</string>
+</resources>

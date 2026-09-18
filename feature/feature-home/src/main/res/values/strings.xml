@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="home_title">FakeLocation</string>
+    <string name="home_pick_hint">长按地图选择目标位置</string>
+    <string name="home_start">开始模拟</string>
+    <string name="home_stop">停止模拟</string>
+    <string name="home_need_permission">缺少定位权限</string>
+    <string name="home_need_mock_auth">请到「开发者选项 - 选择模拟位置应用」中授权本 App</string>
+    <string name="home_running">模拟运行中</string>
+</resources>
