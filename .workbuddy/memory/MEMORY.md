@@ -32,6 +32,11 @@
   `.gitignore`，使其不出现在 untracked 列表。需要 `git add -f .gitignore` 绕过。
 - `gradlew` 以 100755 提交（可执行位正常）；项目**缺 `gradlew.bat`**，Windows 下无法用 wrapper 构建。
 - `.codebuddy/specs/` 与 `.workbuddy/memory/` 纳入版本控制（非缓存，有价值）。
+- **⚠️ 推送坑（2026-11-11）**：`github.com:22` 在国内会 `Operation timed out`，
+  但 `ssh.github.com:443`（GitHub 官方 SSH-over-HTTPS）通。推送用临时 URL 改写，不改 remote：
+  `git -c url."ssh://git@ssh.github.com:443/".insteadOf="git@github.com:" push fake-location master`
+  首次连 443 需 `-o StrictHostKeyChecking=accept-new` 写入 known_hosts（已写入）。
+  `git ls-remote` 同样要带这个 `-c` 参数。
 
 ## 外部服务依赖（国内网络，重要）
 
