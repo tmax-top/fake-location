@@ -55,6 +55,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.fakelocation.core.common.model.LatLng
+import com.fakelocation.core.mock.MockLocationService
 import com.fakelocation.feature.home.map.OsmTileSources
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -114,6 +115,23 @@ fun HomeRoute(
             snackbarHostState.showSnackbar(it)
             viewModel.consumeError()
         }
+    }
+
+    // 关键修复（F2）：前台服务严格跟随引擎运行状态自动启停。
+    // 放在状态观察里而非 BottomBar 的点击回调里，好处是：
+    // 1. 引擎启动失败（未授权/无权限）时 isRunning 仍为 false，不会留下幽灵通知
+    // 2. Activity 重建后能自动与引擎状态重新对齐
+    // 3. 切到高德等第三方 App 后进程保持前台服务优先级，注入不被回收
+    var wasRunning by remember { mutableStateOf(false) }
+    LaunchedEffect(uiState.isRunning) {
+        if (uiState.isRunning) {
+            MockLocationService.start(context)
+        } else if (wasRunning) {
+            // 只在「确实从运行切到停止」时停服务。首次组合或 Activity 重建时
+            // uiState 会短暂回到初始值 false，若此时 stop 会误伤仍在运行的引擎。
+            MockLocationService.stop(context)
+        }
+        wasRunning = uiState.isRunning
     }
 
     Scaffold(

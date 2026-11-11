@@ -53,7 +53,7 @@ Photon request: https://photon.komoot.io/api/?q=shanghai&limit=6
 | 3 | §1 技术约束 | 网络：`Retrofit + OkHttp`（Google Places / Directions） | **`HttpURLConnection` + Nominatim**（OSM）。Retrofit/OkHttp/Moshi 依赖已声明但**零使用** | 改文档；并决定是否清理未用依赖 |
 | 4 | §1 技术约束 | 国际化 `values-zh / values-en` 双语 | 只有 `values/`（中文默认）+ `values-en`；**无 `values-zh`** | 改文档 |
 | 5 | §1.1 验收项 | 「Google Maps 暗色样式：加载 `map_style_night.json`」 | 已切 osmdroid，该条**永久失效** | 删除该条 |
-| 6 | §1.1 验收项 | Android 14 `foregroundServiceType="location"` | Manifest 已声明 `FOREGROUND_SERVICE` + `FOREGROUND_SERVICE_LOCATION` 权限，但**没有任何 Service 实现**（无前台服务） | 标注「权限已备，服务未实现」 |
+| 6 | §1.1 验收项 | Android 14 `foregroundServiceType="location"` | ✅ **2026-11-11 已补齐**：`MockLocationService` 实现 + library Manifest 声明 `foregroundServiceType="location"`，权限此前已备 | 已完成 |
 | 7 | §9 测试 | `JUnit5 + MockK` | **JUnit 4.13.2 + kotlin-test**，无 MockK | 改文档 |
 | 8 | §9 测试 | 单测覆盖：路线插值、Haversine、Bearing、抖动 | 只有 `GeoUtilsTest`（Haversine/Bearing）、`JitterGeneratorTest`（抖动）。**路线插值不存在** | 路线插值随 v0.4 一起做 |
 | 9 | §10 工程合规 | 「API Key 保护」标题下同时写「v0.1 已废弃改用 osmdroid」**又**保留「Maps/Places/Directions Key 限制包名 + SHA1」验收项 | 无 Key，实际无需保护 | 删除矛盾验收项，改为「免 Key 架构说明」并链接 `docs/api-keys.md` |
@@ -92,6 +92,10 @@ Photon request: https://photon.komoot.io/api/?q=shanghai&limit=6
 
 > 🔧 2026-09-18：瓦片源已从固定的 `tile.openstreetmap.org`（国内被 DNS 污染）
 > 改为「候选源 + 可达性探测」，默认切到 OSM France HOT。详见本文档第 0 节。
+>
+> 🔧 2026-11-11：修复「设置好定位后闪一下就回真实位置」—— 授权探测不再删
+> gps provider、注入失败自愈、前台服务保活、补 `fused` 可选通道、通知不再反复重弹。
+> 完整因果链与验证命令见 [docs/mock-location-troubleshooting.md](./mock-location-troubleshooting.md)。
 
 | 验收项 | 状态 | 说明 |
 |-------|------|------|
@@ -99,9 +103,9 @@ Photon request: https://photon.komoot.io/api/?q=shanghai&limit=6
 | 拖动 marker 微调 | ❌ | marker 未设 `isDraggable` |
 | 地图旋转 / 缩放 / 图层切换（普通/卫星） | ⚠️ 部分 | 缩放 ✅、多点触控 ✅、**瓦片源自动降级 ✅**；**旋转关闭**、**无图层切换** |
 | 显示当前位置与 mock 位置连线 | ❌ | 未实现（有 `MyLocation` FAB 但无连线） |
-| 开始后通知栏常驻通知 | ❌ | 无前台服务 |
-| 第三方 App 立即显示目标位置 | ✅ | 双 provider 注入 |
-| 停止后恢复真实位置 | ✅ | `removeTestProvider` |
+| 开始后通知栏常驻通知 | ✅ | 2026-11-11 补 `MockLocationService`（静默、IMPORTANCE_LOW）。注意系统那条「正在提供模拟位置」是另一条，App 无法关闭 |
+| 第三方 App 立即显示目标位置 | ⚠️ 部分 | gps + network + fused（可选）三通道注入 + 前台服务保活 + 失败自愈；**高德等自有 SDK 的 App 仍可能回真实定位**，属机制上限 |
+| 停止后恢复真实位置 | ✅ | `removeTestProvider`（含 fused） |
 | 启动时校验 `isFromMockProvider` 返回 true | ❌ | 未实现自校验 |
 | OSM 署名（ODbL 合规） | ✅ | 2026-09-18 补 `CopyrightOverlay`（地图页；「关于」页仍待补） |
 
@@ -109,15 +113,17 @@ Photon request: https://photon.komoot.io/api/?q=shanghai&limit=6
 
 | 验收项 | 状态 | 代码位置 |
 |-------|------|---------|
-| 同时 mock gps + network | ✅ | `MockLocationEngineImpl.setupProviders()` |
+| 同时 mock gps + network | ✅ | `MockLocationEngineImpl.setupProviders()`；2026-11-11 另加**可选** `fused` 通道 |
 | 注入频率可调：默认 1 Hz，可选 0.5/1/2/5 Hz | ⚠️ 部分 | `MockConfig.frequencyHz` 支持且 `sanitizedCopy` 钳制到 [0.5, 5.0]，但**没有 UI 可改**，恒为 1 Hz |
 | 位置字段完整（accuracy/altitude/bearing/speed） | ⚠️ 部分 | accuracy ✅ 5m；bearing 有值（但见下方问题）；**`altitude` 恒 0.0**、**`speed` 恒 0.0** |
 | 模拟随机抖动 ±3m | ✅ | `JitterGenerator`，默认 3.0 m |
 | Bearing 派生自相邻 polyline 方向角 | ❌ | 单点模式下 `injectLoop` 用 `bearing += random(-15°, +15°)` 随机漂移，**并非派生自路径**。该验收项属路线模式（v0.4） |
 | 注入失败处理：SecurityException 提示 | ⚠️ 部分 | 引擎返回 `Result.failure`，`HomeViewModel` 落 `_error` → Snackbar；文案是原始异常 message，**非友好提示** |
-| provider 已存在 → 先 remove 再 add | ✅ | `setupProviders()` 开头清理 |
+| **运行中 provider 失效自愈** | ✅ | 2026-11-11 新增（S3）：`pushLocation()` 返回 Boolean，连续 2 次失败自动重建 provider + 补推，冷却 5 s。此前异常被静默吞掉且永不恢复 |
+| provider 已存在 → 先 remove 再 add | ✅ | `setupProviders()` 开头清理（含 fused） |
 | 并发竞争 → 加锁串行化 | ✅ | `Mutex` + `cancelAndJoin` |
 | 停止后立即停止注入，不做渐进回归 | ✅ | 直接 `removeTestProvider` |
+| 授权探测不破坏正在运行的 provider | ✅ | 2026-11-11 新增（A1/A3）：独立探针名 + 运行中跳过探测 |
 
 ### §5.1 地点搜索 —— ✅ 已完成（实现在 feature-home 内，未拆到 feature-search）
 
@@ -131,7 +137,6 @@ Photon request: https://photon.komoot.io/api/?q=shanghai&limit=6
 ### 未开始
 
 - §4 路线模拟（全部）
-- §4.3 后台运行 / 前台服务
 - §5.2 收藏、§5.3 历史
 - §6 设置
 - §7 错误与边界处理（部分已隐含实现）

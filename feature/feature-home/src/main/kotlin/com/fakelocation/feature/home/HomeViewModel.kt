@@ -121,9 +121,23 @@ class HomeViewModel @Inject constructor(
     /**
      * 同时刷新 mock 授权状态与运行时定位权限。
      * 建议在 onResume 时调用。
+     *
+     * ## 关键修复（A3）：引擎运行中跳过授权探测
+     *
+     * 旧实现在每次 `ON_RESUME` 无条件调用 `authChecker.isAuthorized()`。
+     * 用户「开始模拟 → 切到高德 → 切回 App」就会触发一次探测，
+     * 旧探测器会 `removeTestProvider("gps")`，把引擎正在用的通道删掉，
+     * 注入随后静默失败 —— 表现为假位置「闪一下」就回真实定位。
+     *
+     * 能进入 Running 状态本身就证明授权有效，此时无需再探测，
+     * 也避免任何 provider 扰动与系统「正在提供模拟位置」通知重弹。
      */
     fun refreshAuthState(context: Context) {
-        _authorized.value = authChecker.isAuthorized()
+        val engineState = engine.state.value
+        val isActive = engineState is MockState.SinglePointRunning ||
+            engineState is MockState.RouteRunning ||
+            engineState is MockState.Starting
+        _authorized.value = if (isActive) true else authChecker.isAuthorized()
         _permission.value = REQUIRED_PERMISSIONS.all { perm ->
             ContextCompat.checkSelfPermission(context, perm) == PackageManager.PERMISSION_GRANTED
         }

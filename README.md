@@ -2,7 +2,7 @@
 
 基于 Android「开发者选项 - 选择模拟位置应用」机制的**虚拟定位工具**。免 Root、免 API Key。
 
-用户在地图上选点（或搜索地址），App 通过 `LocationManager.setTestProviderLocation` 向系统的 `gps` + `network` 两个 provider 持续注入伪造坐标，其他 App（地图、打车、外卖、社交等）随即读到指定位置；停止后立即恢复真实位置。
+用户在地图上选点（或搜索地址），App 通过 `LocationManager.setTestProviderLocation` 向系统的 `gps` + `network` + `fused`（可选）三个 provider 持续注入伪造坐标，其他 App（地图、打车、外卖、社交等）随即读到指定位置；停止后立即恢复真实位置。
 
 > ⚠️ 仅用于 LBS 应用测试、隐私保护等合法场景。见 [风险与限制](#风险与限制)。
 
@@ -16,7 +16,7 @@
 | v0.2 | 首次启动引导（3 页）+ 权限/授权自检 + 地址搜索 | ✅ 已完成（`versionName = 0.2.0`） |
 | v0.3 | 搜索 / 收藏 / 历史 + 错误处理 | ⬜ 未开始（模块已占位） |
 | v0.4 | 路线模拟（polyline 插值） | ⬜ 未开始（模块已占位） |
-| v0.5+ | 后台保活 / 设置 / 诊断 / 合规上架 | ⬜ 未开始 |
+| v0.5+ | 后台保活 / 设置 / 诊断 / 合规上架 | ⚠️ 部分：前台服务保活 ✅（2026-11-11），其余未开始 |
 
 功能清单与验收标准见 [REQUIREMENTS.md](./REQUIREMENTS.md)；**实现与需求的逐条对照**见 [docs/implementation-status.md](./docs/implementation-status.md)。
 
@@ -26,9 +26,13 @@
 - ✅ 主地图页（osmdroid / OSM 瓦片）：长按选点、拖动微调、地址搜索、回到当前位置
 - ✅ **瓦片源自动降级**：探测 OSM France / Germany / 官方三个候选源，取第一个可达的。规避 `*.openstreetmap.org` 在国内被 DNS 污染导致的地图空白
 - ✅ **地址搜索双源降级**：Photon 主源 + Nominatim 兜底，250 ms 防抖
-- ✅ 开始 / 停止模拟：gps + network 双 provider 注入，1 Hz，±3 m 随机抖动
+- ✅ 开始 / 停止模拟：gps + network + fused（可选）三 provider 注入，1 Hz，±3 m 随机抖动
+- ✅ **前台服务保活**：切到第三方 App 后注入不中断；通知静默、低优先级
+- ✅ **注入失败自愈**：provider 意外失效时自动重建并补推，不再静默失败
 - ✅ 顶部状态横幅：实时提示缺失权限 / 未授权 / 运行中 / 已选点
 - ❌ 路线模拟、收藏、历史、设置、诊断页（均为空壳占位）
+
+> 定位「闪一下就回真实位置」、通知反复弹等问题，见 [docs/mock-location-troubleshooting.md](./docs/mock-location-troubleshooting.md)。
 
 ---
 
@@ -125,26 +129,30 @@ fake-location/
 
 ## 核心原理
 
-`app/src/main/java/.../core/core-mock/MockLocationEngineImpl.kt`：
+`core/core-mock/src/main/kotlin/com/fakelocation/core/mock/MockLocationEngineImpl.kt`：
 
-1. `addTestProvider("gps")` / `addTestProvider("network")` —— **两个都注册**，因为部分 App 只读 `network`
+1. `addTestProvider("gps")` / `addTestProvider("network")` / `addTestProvider("fused")` —— 前两个必注册（部分 App 只读 `network`），`fused` 为可选通道（部分 ROM 不允许 override，失败静默降级）
 2. `setTestProviderEnabled` + `setTestProviderStatus(AVAILABLE)` —— 部分 App 会读 provider 状态
-3. 循环 `setTestProviderLocation()` —— 默认 1 Hz，位置带 ±3 m 随机抖动，避免被判定为「静止点」
+3. 循环 `setTestProviderLocation()` —— 默认 1 Hz，位置带 ±3 m 随机抖动，避免被判定为「静止点」；失败时自动重建 provider 并补推
 4. `stop()` 时先 `cancelAndJoin()` 等待注入协程真正退出，再 `removeTestProvider` —— 否则会出现「provider 已移除但协程还在写入」的竞态
 5. 启动前清理残留 provider —— 覆盖上次崩溃/被强杀导致的残留
+6. `MockLocationService` 前台服务保活 —— 切到第三方 App 后进程不被回收，注入持续
 
-未授权时 `addTestProvider` 抛 `SecurityException`，`MockAuthChecker` 用它反推授权状态（先清理残留 → 探测 → 再清理，不留痕迹）。
+未授权时 `addTestProvider` 抛 `SecurityException`，`MockAuthChecker` 用它反推授权状态。
+⚠️ 探测**必须用独立的 provider 名**（`fake_location_auth_probe`），绝不能用 `gps` ——
+否则会删掉引擎正在使用的 test provider，导致注入静默失效。详见 [docs/mock-location-troubleshooting.md](./docs/mock-location-troubleshooting.md)。
 
 ---
 
 ## 风险与限制
 
 1. **必须人工授权**：Android 6+ 无法绕过「开发者选项 → 选择模拟位置应用」，App 只能引导用户去设置。
-2. **不保证欺骗所有 App**：部分 App 通过 `Location.isFromMockProvider` 或服务端 IP/基站交叉校验识别虚拟定位。
+2. **不保证欺骗所有 App**：高德等 App 使用自有定位 SDK（AMap Location SDK）走基站 / WiFi / IP 融合定位，可能压根不读 `LocationManager` 的 provider；也可能通过 `Location.isFromMockProvider` 主动丢弃 mock 位置。已补 `fused` 通道尽量覆盖，但**属免 Root 机制上限，无法保证**。详见 [docs/mock-location-troubleshooting.md](./docs/mock-location-troubleshooting.md)。
 3. **国内 ROM 差异**：MIUI / EMUI / HarmonyOS / ColorOS 对 mock provider 有额外限制，需逐个验证（尚未做兼容性矩阵）。
 4. **jitter 只解决视觉层真实感**，对设备指纹 / 行为画像级别的反作弊无效。
 5. **依赖 OSM 免费公共服务**：Photon / OSM France / OSM Germany 均为志愿者运维。国内网络对 `*.openstreetmap.org` 存在 **DNS 污染**，App 已做多源降级，但若某网络下所有候选源都不可达，地图仍会空白。详见 [docs/network-reachability.md](./docs/network-reachability.md)。
 6. **Release 包当前用 debug keystore 签名**，仅可内部安装，**不可上架**。上架前必做见 [docs/release-checklist.md](./docs/release-checklist.md)。
+7. **系统会常驻「正在提供模拟位置」通知**：由 `pkg=android` 的 `GnssNotificationManager` 发出，是 AOSP 反滥用设计，App 无法关闭。其「关闭模拟定位」按钮会撤销授权，**不要点**；点了需重新去开发者选项选择模拟位置应用。
 
 ---
 
@@ -164,6 +172,7 @@ fake-location/
 | [REQUIREMENTS.md](./REQUIREMENTS.md) | 产品需求、验收标准、迭代里程碑 |
 | [docs/architecture.md](./docs/architecture.md) | 模块架构、分层约定、扩展指南 |
 | [docs/implementation-status.md](./docs/implementation-status.md) | 需求 vs 实现逐条对照、已知问题清单 |
+| [docs/mock-location-troubleshooting.md](./docs/mock-location-troubleshooting.md) | **定位失效排查**（闪一下回真实定位、反复弹提醒、注入链路与固有限制） |
 | [docs/network-reachability.md](./docs/network-reachability.md) | **外部服务依赖与国内网络可达性**（DNS 污染排查、瓦片/搜索多源策略） |
 | [docs/api-keys.md](./docs/api-keys.md) | 为什么没有 API Key，以及将来若引入时要怎么做 |
 | [docs/release-checklist.md](./docs/release-checklist.md) | 上架前检查清单 |

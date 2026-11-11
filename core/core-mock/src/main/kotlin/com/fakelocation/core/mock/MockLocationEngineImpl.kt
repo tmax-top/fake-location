@@ -60,6 +60,13 @@ class MockLocationEngineImpl @Inject constructor(
     private var config: MockConfig = MockConfig()
 
     /**
+     * `fused` 通道是否注册成功。部分 ROM 不允许 override fused provider，
+     * 此时静默跳过，绝不影响 gps / network 主链路。
+     */
+    @Volatile
+    private var fusedProviderAvailable = false
+
+    /**
      * 更新引擎配置。下一次 startAt 时生效。
      *
      * 关键修复（M3）：非法值通过 [MockConfig.sanitizedCopy] 钳制到合法区间，
@@ -147,6 +154,12 @@ class MockLocationEngineImpl @Inject constructor(
                 locationManager.removeTestProvider(TEST_PROVIDER_NETWORK)
             }
         }
+        runCatching {
+            if (locationManager.allProviders.contains(TEST_PROVIDER_FUSED)) {
+                locationManager.removeTestProvider(TEST_PROVIDER_FUSED)
+            }
+        }
+        fusedProviderAvailable = false
 
         // 关键修复：永远调 addTestProvider，让系统自己决定（覆盖 real provider / 黑名单 / 已注册）。
         // 之前用 if (!allProviders.contains(...)) 跳过时，如果系统 real gps 已存在，
@@ -187,6 +200,32 @@ class MockLocationEngineImpl @Inject constructor(
         Log.w(TAG, "setTestProviderEnabled(network) ok, setTestProviderStatus…")
         LegacyLocationApi.setTestProviderStatus(locationManager, TEST_PROVIDER_NETWORK)
         Log.w(TAG, "setTestProviderStatus(network) ok, allProviders(after) = ${locationManager.allProviders}")
+
+        // 关键修复（C1）：额外覆盖 fused provider（尽力而为通道）。
+        // 真机 dumpsys location 显示高德走 fused provider，其 last location 带
+        // amap=1 / flpProvider=network。只 mock gps + network 时，读 fused 的 App
+        // 拿不到假位置 —— 这正是「闪一下就回真实定位」的第三个原因。
+        // 部分 ROM 不允许注册 fused test provider，失败必须静默降级，
+        // 绝不能让 setupProviders() 整体失败（否则连 gps/network 都起不来）。
+        fusedProviderAvailable = runCatching {
+            LegacyLocationApi.addTestProvider(
+                locationManager,
+                TEST_PROVIDER_FUSED,
+                /* requiresNetwork    = */ false,
+                /* requiresSatellite  = */ false,
+                /* requiresCell       = */ false,
+                /* hasMonetaryCost    = */ false,
+                /* supportsAltitude   = */ true,
+                /* supportsSpeed      = */ true,
+                /* supportsBearing    = */ true,
+            )
+            locationManager.setTestProviderEnabled(TEST_PROVIDER_FUSED, true)
+            LegacyLocationApi.setTestProviderStatus(locationManager, TEST_PROVIDER_FUSED)
+            true
+        }.onFailure {
+            Log.w(TAG, "fused provider 不可用，已跳过（不影响主链路）", it)
+        }.getOrDefault(false)
+        Log.w(TAG, "fusedProviderAvailable=$fusedProviderAvailable")
     }
 
     private fun removeProviders() {
@@ -200,29 +239,72 @@ class MockLocationEngineImpl @Inject constructor(
                 locationManager.removeTestProvider(TEST_PROVIDER_NETWORK)
             }
         }
+        runCatching {
+            if (locationManager.allProviders.contains(TEST_PROVIDER_FUSED)) {
+                locationManager.removeTestProvider(TEST_PROVIDER_FUSED)
+            }
+        }
+        fusedProviderAvailable = false
     }
 
     // endregion
 
     // region -- inject loop --
 
+    /**
+     * 关键修复（S3）：注入循环带**失败自愈**。
+     *
+     * 旧实现里 `pushLocation()` 用 `runCatching` 吞掉所有异常且不返回状态，
+     * 一旦 test provider 因任何原因失效（系统回收、授权变更、ROM 主动
+     * `removeTestProvider`），后续每一秒的注入都会静默失败且**永不恢复**，
+     * UI 却仍显示「运行中」。这就是用户看到假位置只闪一下就回真实定位的原因。
+     *
+     * 现在：连续失败达到 [REBUILD_AFTER_FAILURES] 次就重建 provider 并立刻重推；
+     * 重建有 [REBUILD_COOLDOWN_MS] 冷却，避免每 1 Hz 都 add/remove 触发系统
+     * 「正在提供模拟位置」通知反复弹出。
+     */
     private suspend fun injectLoop(target: LatLng) {
         val periodMs = (1000.0 / config.frequencyHz).roundToLong().coerceAtLeast(50L)
         val jitter = JitterGenerator(Random.Default, config.jitterMeters)
         var lastBearing = 0.0
+        var consecutiveFailures = 0
+        var lastRebuildElapsedMs = 0L
 
         while (scope.isActive) {
             val jittered = jitter.apply(target)
-            pushLocation(jittered, lastBearing)
+            if (pushLocation(jittered, lastBearing)) {
+                consecutiveFailures = 0
+            } else {
+                consecutiveFailures++
+                val nowElapsed = SystemClock.elapsedRealtime()
+                if (consecutiveFailures >= REBUILD_AFTER_FAILURES &&
+                    nowElapsed - lastRebuildElapsedMs >= REBUILD_COOLDOWN_MS
+                ) {
+                    Log.w(TAG, "连续 $consecutiveFailures 次注入失败，重建 test provider")
+                    val rebuilt = runCatching { setupProviders() }
+                        .onFailure { Log.w(TAG, "重建 provider 失败", it) }
+                        .isSuccess
+                    lastRebuildElapsedMs = nowElapsed
+                    consecutiveFailures = 0
+                    if (rebuilt) {
+                        // 立刻补推一次，把重建造成的空窗压到最短
+                        pushLocation(jittered, lastBearing)
+                    }
+                }
+            }
 
             lastBearing = (lastBearing + Random.nextDouble(-15.0, 15.0) + 360.0) % 360.0
             delay(periodMs)
         }
     }
 
-    private fun pushLocation(at: LatLng, bearing: Double) {
+    /**
+     * 向两个 provider 注入一次位置。
+     * @return 是否**两个都成功**。任一失败即返回 false，交由 [injectLoop] 决策重建。
+     */
+    private fun pushLocation(at: LatLng, bearing: Double): Boolean {
         val now = System.currentTimeMillis()
-        runCatching {
+        val result = runCatching {
             val gps = Location(TEST_PROVIDER_GPS).apply {
                 latitude = at.latitude
                 longitude = at.longitude
@@ -246,7 +328,27 @@ class MockLocationEngineImpl @Inject constructor(
                 elapsedRealtimeNanos = SystemClock.elapsedRealtimeNanos()
             }
             locationManager.setTestProviderLocation(TEST_PROVIDER_NETWORK, net)
-        }.onFailure { Log.w(TAG, "pushLocation failed", it) }
+        }
+        result.onFailure { Log.w(TAG, "pushLocation failed", it) }
+
+        // fused 尽力而为：成功则多覆盖一条通道，失败既不影响主链路结果，
+        // 也不打日志（否则每秒一条会淹没 logcat）。重建时会自动重新尝试注册。
+        if (fusedProviderAvailable) {
+            runCatching {
+                val fused = Location(TEST_PROVIDER_FUSED).apply {
+                    latitude = at.latitude
+                    longitude = at.longitude
+                    accuracy = config.accuracyMeters
+                    altitude = 0.0
+                    this.bearing = bearing.toFloat()
+                    speed = 0.0f
+                    time = now
+                    elapsedRealtimeNanos = SystemClock.elapsedRealtimeNanos()
+                }
+                locationManager.setTestProviderLocation(TEST_PROVIDER_FUSED, fused)
+            }
+        }
+        return result.isSuccess
     }
 
     // endregion
@@ -259,6 +361,13 @@ class MockLocationEngineImpl @Inject constructor(
         private const val TAG = "MockLocationEngine"
         const val TEST_PROVIDER_GPS = "gps"
         const val TEST_PROVIDER_NETWORK = "network"
+        const val TEST_PROVIDER_FUSED = "fused"
+
+        /** 连续注入失败多少次后重建 provider（默认 1 Hz，约 2 秒）。 */
+        private const val REBUILD_AFTER_FAILURES = 2
+
+        /** 两次重建之间的最小间隔，避免频繁 add/remove 触发系统通知重弹。 */
+        private const val REBUILD_COOLDOWN_MS = 5_000L
     }
 }
 

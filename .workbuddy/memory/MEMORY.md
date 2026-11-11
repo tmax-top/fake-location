@@ -2,7 +2,7 @@
 
 ## 项目概况
 
-- **是什么**：Android 虚拟定位 App。基于系统「开发者选项 → 选择模拟位置应用」机制，向 `gps` + `network` 两个 provider 注入伪造坐标。
+- **是什么**：Android 虚拟定位 App。基于系统「开发者选项 → 选择模拟位置应用」机制，向 `gps` + `network` + 可选 `fused` 三个 provider 注入伪造坐标；前台服务保活。
 - **包名**：`com.fakelocation`；当前 `versionName = 0.2.0`
 - **技术栈**：Kotlin 1.9.24 · Jetpack Compose + Material3 · Hilt 2.51.1（kapt）· osmdroid 6.1.20 · DataStore · AGP 8.5.2
 - **SDK**：compileSdk 36 / targetSdk 36 / minSdk 29 / JVM 17
@@ -57,23 +57,53 @@
 
 ## 核心引擎设计要点（core-mock）
 
-1. 同时注册 `gps` + `network` 两个 test provider（部分 App 只读 network）
+1. 注册 `gps` + `network` 两个必需 test provider，外加**可选** `fused`（部分 ROM 不允许 override，失败静默降级；高德走 fused）
 2. **不做** `if (allProviders.contains(name)) return` 短路 —— 系统 real gps/network 名字就是 `gps`/`network`，短路会导致后续 `setTestProviderEnabled` 抛 "is not a test provider"
 3. 停止时必须 `injectJob?.cancelAndJoin()` 等注入协程真正退出，再 `removeTestProvider`（否则竞态）
 4. 启动前清理残留 provider（覆盖上次崩溃）
-5. 授权探测（`MockAuthChecker`）：清理残留 → `addTestProvider` 探测 → 再清理，不留痕迹
+5. ⚠️ **授权探测必须用独立 provider 名 `fake_location_auth_probe`，绝不能用 `gps`** ——
+   `addTestProvider` 的 appop 校验与名字无关，用 gps 会删掉引擎正在用的 test provider
+   （这是「定位闪一下就回真实」的根因，2026-11-11 修复）。运行中还应跳过探测
 6. API 差异集中在 `LegacyLocationApi`：API 31+ 用 `ProviderProperties`，API 29/30 用 deprecated `Criteria`
 7. `MockConfig.sanitizedCopy()` 钳制越界值而非抛异常
 8. `MockState.RouteRunning(progress)` 已预留但**尚无代码构造它**（为 v0.4 路线模拟准备）
+9. `pushLocation()` 返回 Boolean；连续 2 次失败自动 `setupProviders()` 重建 + 补推，冷却 5s（S3 自愈）
+10. `MockLocationService` 前台服务保活，放 `:core:core-mock`（feature 层不能反向依赖 `:app`），
+    Manifest 由 library 合并；只用 framework API + `android.R`，零新依赖
 
-## 当前未完状态（截至 2026-09-18）
+## 已知运行限制与已修复缺陷（2026-11-11 真机诊断）
+
+- **系统级「正在提供模拟位置」通知无法关闭**：来自 `android` 包 `GnssNotificationManager`
+  （channel `GPS_STATUS_MONITOR_ID`，`pkg=android id=11`，带「关闭模拟定位」按钮 →
+  `android/GnssService`），`timeout=PT72H`、`isNoisy=true`。只要注册了 test provider
+  并注入 mock 位置，AOSP/MIUI 就会常驻提示，App **无权抑制** —— 这是设计如此，不是 bug。
+  ⚠️ 用户点「关闭模拟定位」会撤销授权，需重新去开发者选项选择模拟位置应用。
+- ✅ **已修（2026-11-11）授权探测破坏注入链路**：原 `MockAuthChecker` 用 `gps` 做
+  remove/add/remove 探测，`HomeRoute` 每次 `ON_RESUME` 都调 → 删掉引擎的 gps test provider，
+  `pushLocation` 又用 `runCatching` 静默吞异常且永不恢复 → 假位置只闪一下。
+  修复：独立探针名 + 500ms 缓存 + 运行中跳过探测 + 注入失败自愈。
+  系统通知的「反复重弹」（`airtimeCount=21`）也随之消除。
+- ✅ **已修（2026-11-11）切后台注入停止**：新增 `MockLocationService` 前台服务
+  （`foregroundServiceType=location`），随 `uiState.isRunning` 启停。
+- **高德地图仍可能回落到真实定位，属免 Root 机制上限**：高德用自有 AMap Location SDK，
+  走 `fused` provider（last location 的 Bundle 带 `amap=1 / flpProvider=network`，
+  实测为上海真实坐标 31.238649,121.433987），且会按 `isFromMockProvider` 丢弃 mock 位置。
+  已补 `fused` 通道尽量覆盖，**无法保证**。启动时「闪一下」是拿到了 last known
+  mock 坐标，随后自有融合定位覆盖。
+- 完整因果链、修复清单、adb 验证命令见 `docs/mock-location-troubleshooting.md`。
+- 排查命令留存：`adb shell dumpsys notification --noredact | grep -A40 GnssNotificationManager`、
+  `adb shell dumpsys location | grep -iE "mock|provider|last location"`、
+  `adb shell cmd appops get com.fakelocation android:mock_location`、
+  `aapt2 dump xmltree <apk> --file AndroidManifest.xml`（验 Manifest 合并）。
+
+## 当前未完状态（截至 2026-11-11）
 
 | 类别 | 状态 |
 |------|------|
 | 已实现 | `:core:core-common`、`:core:core-mock`、`:core:core-ui`、`:feature:feature-onboarding`、`:feature:feature-home` |
 | 空壳占位 | `:data:data-local/remote/repository`、`feature-search/favorites/history/route/settings/diagnostics` —— **均未被 `:app` 依赖** |
 | 无 NavHost | `MainActivity.AppRoot()` 只有 onboarding/home 二元 switch |
-| 无前台服务 | Manifest 已声明 `FOREGROUND_SERVICE_LOCATION` 权限，但无任何 Service 实现 |
+| 前台服务 | ✅ 已实现（2026-11-11）；**真机验证待补**（当时 USB 断开） |
 | 无 Git | ~~仓库未初始化版本控制~~ → 已建立，远端 `tmax-top/fake-location`，基线 `8f67bd3` |
 | Release 签名 | 用 `debug.keystore`，不可上架 |
 | 测试 | 仅 2 个纯函数单测（`GeoUtilsTest`、`JitterGeneratorTest`） |
@@ -86,6 +116,8 @@
 | `REQUIREMENTS.md` | 产品需求 + 验收标准（已与实现对齐） |
 | `docs/architecture.md` | 模块架构、分层规则、扩展指南、引擎设计 |
 | `docs/implementation-status.md` | **需求 vs 实现逐条对照 + 21 项已知代码问题**（最常用） |
+| `docs/network-reachability.md` | DNS 污染实测、瓦片/搜索多源策略、排查命令 |
+| `docs/mock-location-troubleshooting.md` | **定位失效排查**：闪一下回真实、反复弹提醒、注入链路与固有限制 |
 | `docs/api-keys.md` | 免 Key 架构说明 + 将来引入 Key 的正确做法 |
 | `docs/release-checklist.md` | 上架检查清单 |
 | `.codebuddy/specs/<feature>/` | bmad-pilot 工作流的规格目录（00-repo-scan / 01-PRD / 02-架构 / 03-sprint / 04-review） |

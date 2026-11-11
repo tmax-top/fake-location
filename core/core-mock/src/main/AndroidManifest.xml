@@ -12,5 +12,16 @@
         tools:ignore="ProtectedPermissions" />
     -->
 
-    <application />
+    <application>
+        <!--
+          模拟定位保活服务。foregroundServiceType=location 与 :app Manifest 中
+          FOREGROUND_SERVICE_LOCATION 权限配套（Android 14 / targetSdk 34+ 强制）。
+          exported=false：仅供本进程内部启停。
+          权限声明在 :app，library manifest 合并后生效。
+        -->
+        <service
+            android:name="com.fakelocation.core.mock.MockLocationService"
+            android:exported="false"
+            android:foregroundServiceType="location" />
+    </application>
 </manifest>
