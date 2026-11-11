@@ -116,6 +116,32 @@ adb -s $D shell dumpsys notification --noredact | grep "GnssNotificationManager"
 # 期望：计数不再持续上涨
 ```
 
+### 4.1 真机验证结果（2026-11-11 11:05，已全部通过）
+
+设备：Redmi `24122RKC7C` / Android 17，APK 于 `10:54:51` 覆盖安装。
+
+| 验证项 | 实测结果 | 判定 |
+|-------|---------|------|
+| 引擎启动 | `addTestProvider(gps/network/fused)` 全部成功，`fusedProviderAvailable=true`，`前台服务已启动` | ✅ |
+| 三通道注入 | `gps` / `network` / `fused` 的 last location 全部为设定坐标且带 `mock` 标记；间隔 5 秒采样坐标有 ±3 m 抖动、`et=` 时间戳持续前进 | ✅ 持续注入 |
+| 切后台 10 秒 | 进程 PID 15103 存活、`MockLocationService` 在 `dumpsys activity services` 中、坐标时间戳继续前进 | ✅ 保活生效 |
+| 切回 App（触发 ON_RESUME） | `10:56:26` 之后**无任何新的 removed/added 事件**；授权探测记录全部是 `fake_location_auth_probe`，未触碰 gps | ✅ 探测副作用消除 |
+| 通知重弹 | 整个测试周期 `airtimeCount` 21 → 25（每次引擎启动 add provider 各 +1），切后台/切回不涨 | ✅ 不再反复弹 |
+| 注入失败 | `pushLocation failed` / 重建 / `is not a test provider` 均 **0 次** | ✅ 全程零失败 |
+| **高德地图（关键）** | 设定上海 `31.16669,121.47343` → 高德视野落在浦东前滩/东方体育中心；改设北京 `39.90571,116.39130` 后点高德「我的位置」→ **地图跳到天安门**（可见「天安门 / 天安门西 / 天安门东 / 中国国家博物馆 / 人民英雄纪念碑」）；`dumpsys` 中**不再出现** `amap=1` / `flpProvider=network` 的真实坐标覆盖 | ✅ **高德认了假位置** |
+
+> **重要更正**：修复前「高德走自有 AMap SDK、必然回落真实定位」的判断，在补上 `fused` 通道后**被实测推翻**。
+> 根因是当时只 mock 了 gps + network，高德读的 `fused` 拿到的是它自己的融合定位结果；
+> 现在三个通道都注入 mock 坐标，高德的「我的位置」直接跟随设定坐标。
+> 这不代表所有 App 都能骗过 —— `isFromMockProvider` 检测、应用级反作弊仍然存在，
+> 但**高德地图本身已不再是不可逾越的上限**。
+
+**验证时的操作要点**（避免踩坑）：
+- 未选点时底部「开始模拟」按钮是 `enabled=false`，点击无反应，需先长按地图或点搜索结果选点。
+- 用 `adb shell input swipe X Y X Y 900` 模拟长按选点；搜索结果列表 + 键盘会遮住底部按钮，
+  需先点搜索框右侧 X 再按一次 BACK 收起，否则点击落在键盘上。
+- 高德「我的位置」按钮可用 `uiautomator dump` 找 `content-desc="我的位置"` 拿精确 bounds。
+
 ---
 
 ## 5. 免 Root 方案的固有限制（**改不了**）
@@ -123,13 +149,13 @@ adb -s $D shell dumpsys notification --noredact | grep "GnssNotificationManager"
 | 限制 | 说明 |
 |------|------|
 | 系统「正在提供模拟位置」通知 | `pkg=android` / `GnssNotificationManager`，AOSP 反滥用设计，App 无法抑制。带「关闭模拟定位」按钮，**不要点**（点了会撤销授权，需重新去开发者选项选择模拟位置应用） |
-| 高德等 App 的自有定位 SDK | AMap Location SDK 走基站 / WiFi / IP 融合定位，不依赖 `LocationManager` 的 gps/network；且可能按 `Location.isFromMockProvider` 主动丢弃 mock 位置。已补 `fused` 通道尽量覆盖，但**无法保证** |
+| 高德等 App 的自有定位 SDK | 修复前 AMap SDK 走 `fused` 通道拿到自己的融合定位，导致回落真实坐标。**2026-11-11 实测：补齐 `fused` mock 后高德已能跟随设定坐标**（见 4.1）。但仍不能保证所有版本 / 所有场景下稳定，部分 ROM 不允许 override `fused`，此时仍会回落 |
 | `isFromMockProvider` 检测 | `setTestProviderLocation` 注入的位置必然被系统标记为 mock，任何 App 都能识别 |
 | 应用级反作弊 | 设备指纹、行为画像、服务端 IP 交叉校验，jitter 只解决视觉层真实感 |
 
-**结论**：本次修复解决的是「注入链路被自己打断」这个**代码缺陷**，
-能让系统级定位、以及通过 `LocationManager` 读位置的 App 稳定拿到设定坐标。
-高德自有 SDK 的反作弊属于机制上限，不是 bug。
+**结论**：本次修复解决的是「注入链路被自己打断」这个**代码缺陷**（授权探测误删 provider、
+失败静默吞异常、无前台服务、缺 fused 通道）。真机验证显示系统级定位与高德地图均已能
+稳定拿到设定坐标。剩下的 `isFromMockProvider` 检测与设备指纹级反作弊属于机制上限，不是 bug。
 
 ---
 

@@ -104,7 +104,7 @@ Photon request: https://photon.komoot.io/api/?q=shanghai&limit=6
 | 地图旋转 / 缩放 / 图层切换（普通/卫星） | ⚠️ 部分 | 缩放 ✅、多点触控 ✅、**瓦片源自动降级 ✅**；**旋转关闭**、**无图层切换** |
 | 显示当前位置与 mock 位置连线 | ❌ | 未实现（有 `MyLocation` FAB 但无连线） |
 | 开始后通知栏常驻通知 | ✅ | 2026-11-11 补 `MockLocationService`（静默、IMPORTANCE_LOW）。注意系统那条「正在提供模拟位置」是另一条，App 无法关闭 |
-| 第三方 App 立即显示目标位置 | ⚠️ 部分 | gps + network + fused（可选）三通道注入 + 前台服务保活 + 失败自愈；**高德等自有 SDK 的 App 仍可能回真实定位**，属机制上限 |
+| 第三方 App 立即显示目标位置 | ✅ | gps + network + fused（可选）三通道注入 + 前台服务保活 + 失败自愈；**2026-11-11 真机验证高德地图「我的位置」已跟随设定坐标**（上海前滩 → 北京天安门），详见 `mock-location-troubleshooting.md` 4.1 |
 | 停止后恢复真实位置 | ✅ | `removeTestProvider`（含 fused） |
 | 启动时校验 `isFromMockProvider` 返回 true | ❌ | 未实现自校验 |
 | OSM 署名（ODbL 合规） | ✅ | 2026-09-18 补 `CopyrightOverlay`（地图页；「关于」页仍待补） |
@@ -190,6 +190,12 @@ Photon request: https://photon.komoot.io/api/?q=shanghai&limit=6
 | 19 | `AccessMockLocation` 权限声明的 ROM 兼容性假设未验证 | Manifest 注释中说明是「国内 ROM 过滤条件」，属假设 |
 | 20 | 无 Crash 上报（Crashlytics / Sentry） | §10 P1 项 |
 | 21 | `.gitignore` 已忽略 `/build`、`/app/build`，但 `build-logic/convention/build/` 未被忽略（模式 `/*/build/` 不覆盖二级） | 建议补 `/build-logic/**/build/` |
+
+### 2026-11-11 真机验证新发现
+
+| # | 问题 | 位置 | 影响 / 建议 |
+|---|------|------|------------|
+| 22 | **运行中改点不生效**：模拟运行时在地图上重新选点（或点搜索结果），UI 的「目标：」会更新，但引擎仍在推旧坐标 | `HomeViewModel` 的 `startMock()` / 选点回调只更新 `_picked`，未通知已运行的 `injectLoop` | 真机验证时复现：UI 显示北京 `39.90571`，`dumpsys` 仍是上海 `31.16669`。需先「停止模拟」再重新「开始模拟」才生效。建议运行中改点时重启注入 Job，或在 `injectLoop` 改用 `StateFlow<LatLng>` 读目标 |
 
 ---
 

@@ -147,7 +147,7 @@ fake-location/
 ## 风险与限制
 
 1. **必须人工授权**：Android 6+ 无法绕过「开发者选项 → 选择模拟位置应用」，App 只能引导用户去设置。
-2. **不保证欺骗所有 App**：高德等 App 使用自有定位 SDK（AMap Location SDK）走基站 / WiFi / IP 融合定位，可能压根不读 `LocationManager` 的 provider；也可能通过 `Location.isFromMockProvider` 主动丢弃 mock 位置。已补 `fused` 通道尽量覆盖，但**属免 Root 机制上限，无法保证**。详见 [docs/mock-location-troubleshooting.md](./docs/mock-location-troubleshooting.md)。
+2. **不保证欺骗所有 App**：部分 App 通过 `Location.isFromMockProvider` 或服务端 IP/基站交叉校验识别虚拟定位，jitter 只解决视觉层真实感。高德地图已在真机验证可跟随设定坐标（补齐 `fused` 通道后），但覆盖不了所有 ROM —— 部分 ROM 不允许 override `fused`，此时仍可能回落真实定位。详见 [docs/mock-location-troubleshooting.md](./docs/mock-location-troubleshooting.md)。
 3. **国内 ROM 差异**：MIUI / EMUI / HarmonyOS / ColorOS 对 mock provider 有额外限制，需逐个验证（尚未做兼容性矩阵）。
 4. **jitter 只解决视觉层真实感**，对设备指纹 / 行为画像级别的反作弊无效。
 5. **依赖 OSM 免费公共服务**：Photon / OSM France / OSM Germany 均为志愿者运维。国内网络对 `*.openstreetmap.org` 存在 **DNS 污染**，App 已做多源降级，但若某网络下所有候选源都不可达，地图仍会空白。详见 [docs/network-reachability.md](./docs/network-reachability.md)。

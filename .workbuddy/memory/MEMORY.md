@@ -85,11 +85,19 @@
   系统通知的「反复重弹」（`airtimeCount=21`）也随之消除。
 - ✅ **已修（2026-11-11）切后台注入停止**：新增 `MockLocationService` 前台服务
   （`foregroundServiceType=location`），随 `uiState.isRunning` 启停。
-- **高德地图仍可能回落到真实定位，属免 Root 机制上限**：高德用自有 AMap Location SDK，
-  走 `fused` provider（last location 的 Bundle 带 `amap=1 / flpProvider=network`，
-  实测为上海真实坐标 31.238649,121.433987），且会按 `isFromMockProvider` 丢弃 mock 位置。
-  已补 `fused` 通道尽量覆盖，**无法保证**。启动时「闪一下」是拿到了 last known
-  mock 坐标，随后自有融合定位覆盖。
+- ✅ **已修（2026-11-11）高德回落真实定位**：旧判断「AMap SDK 走 fused 融合定位、
+  免 Root 绕不过」在补齐 `fused` mock 通道后被**真机实测推翻**。当前 gps/network/fused
+  三通道都注入 mock 坐标，高德「我的位置」直接跟随设定坐标（上海前滩 → 北京天安门），
+  `dumpsys` 中不再出现 `amap=1 / flpProvider=network` 的真实坐标覆盖。
+  仍需注意：部分 ROM 不允许 override `fused`，此时可能回落；`isFromMockProvider`
+  检测与应用级反作弊依然存在，**不是**所有 App 都能骗过。
+- ✅ **真机端到端验证已完成（2026-11-11 11:05，Redmi 24122RKC7C / Android 17）**：
+  三通道 last location 均为设定坐标且时间戳持续刷新；切后台 10s 进程与服务存活、
+  注入不停；切回 App 后 `10:56:26` 起无任何新的 remove/add 事件（探测副作用消除）；
+  `pushLocation failed` = 0；`airtimeCount` 全周期仅 21→25（每次引擎启动 +1，不再反复弹）。
+  完整数据表见 `docs/mock-location-troubleshooting.md` 4.1。
+- ⚠️ **新发现（待修）运行中改点不生效**：模拟运行中重新选点只更新 UI 的「目标：」，
+  引擎仍推旧坐标，必须先停止再重新开始。已记为 `implementation-status.md` 问题 #22。
 - 完整因果链、修复清单、adb 验证命令见 `docs/mock-location-troubleshooting.md`。
 - 排查命令留存：`adb shell dumpsys notification --noredact | grep -A40 GnssNotificationManager`、
   `adb shell dumpsys location | grep -iE "mock|provider|last location"`、
@@ -103,7 +111,7 @@
 | 已实现 | `:core:core-common`、`:core:core-mock`、`:core:core-ui`、`:feature:feature-onboarding`、`:feature:feature-home` |
 | 空壳占位 | `:data:data-local/remote/repository`、`feature-search/favorites/history/route/settings/diagnostics` —— **均未被 `:app` 依赖** |
 | 无 NavHost | `MainActivity.AppRoot()` 只有 onboarding/home 二元 switch |
-| 前台服务 | ✅ 已实现（2026-11-11）；**真机验证待补**（当时 USB 断开） |
+| 前台服务 | ✅ 已实现并真机验证通过（2026-11-11）：切后台 10s 进程/服务存活、注入持续 |
 | 无 Git | ~~仓库未初始化版本控制~~ → 已建立，远端 `tmax-top/fake-location`，基线 `8f67bd3` |
 | Release 签名 | 用 `debug.keystore`，不可上架 |
 | 测试 | 仅 2 个纯函数单测（`GeoUtilsTest`、`JitterGeneratorTest`） |
